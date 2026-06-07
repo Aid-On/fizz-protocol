@@ -1,0 +1,228 @@
+// fizz_protocol.emotion — 感情語彙とインラインタグ文法の正本。
+//
+// LLM はストリーミングテキストにインラインタグを織り込む:
+//   [happy]          感情 (正規名またはエイリアス)
+//   [fx:nod]         リアクション / ジェスチャのオーバーレイ
+//   [hair:short]     髪型プリセット要求
+//   [motion:wave]    アクションタグ — 認識した上でテキストからは除去する
+//
+// このモジュールは「単一タグ」の語彙と文法の正本。ストリーミング文章からの
+// 文切り出し (sentence parsing) は brain 部品の責務であり、ここには置かない。
+
+// ── 感情 ─────────────────────────────────────────────────────────────
+//
+// 正規セット = VRM 基本 12 種 + 拡張 9 種。
+// 拡張側はアバター側で blendshape の組み合わせ (EMOTION_CHANNELS) に
+// 解決される前提の論理感情。未知のタグは none → 呼び出し側が Neutral に倒す。
+
+type Emotion: Codec, Repr =
+  | Neutral
+  | Happy
+  | Angry
+  | Sad
+  | Surprised
+  | Relaxed
+  | Joy
+  | Fun
+  | Sorrow
+  | Wink
+  | Blink
+  | Smile
+  | Shy
+  | Excited
+  | Laughing
+  | Crying
+  | Smug
+  | Thinking
+  | Confused
+  | Pout
+  | Jitome
+
+let ALL_EMOTIONS: List[Emotion] = [
+  Neutral, Happy, Angry, Sad, Surprised, Relaxed,
+  Joy, Fun, Sorrow, Wink, Blink, Smile,
+  Shy, Excited, Laughing, Crying, Smug, Thinking,
+  Confused, Pout, Jitome,
+]
+
+// 正規タグ文字列 (ワイヤ上・プロンプト上の表記)。
+fn emotion_to_tag(e: Emotion) -> String = match e {
+  Neutral   => "neutral",
+  Happy     => "happy",
+  Angry     => "angry",
+  Sad       => "sad",
+  Surprised => "surprised",
+  Relaxed   => "relaxed",
+  Joy       => "joy",
+  Fun       => "fun",
+  Sorrow    => "sorrow",
+  Wink      => "wink",
+  Blink     => "blink",
+  Smile     => "smile",
+  Shy       => "shy",
+  Excited   => "excited",
+  Laughing  => "laughing",
+  Crying    => "crying",
+  Smug      => "smug",
+  Thinking  => "thinking",
+  Confused  => "confused",
+  Pout      => "pout",
+  Jitome    => "jitome",
+}
+
+// タグ文字列 → 感情。エイリアス (LLM の言い換え揺れ) もここで正規化する。
+// 未知のタグは none — 呼び出し側は Neutral にフォールバックすること。
+fn emotion_from_tag(tag: String) -> Option[Emotion] =
+  match string.to_lower(string.trim(tag)) {
+    "neutral"     => some(Neutral),
+    "happy"       => some(Happy),
+    "angry"       => some(Angry),
+    "sad"         => some(Sad),
+    "surprised"   => some(Surprised),
+    "relaxed"     => some(Relaxed),
+    "joy"         => some(Joy),
+    "fun"         => some(Fun),
+    "sorrow"      => some(Sorrow),
+    "wink"        => some(Wink),
+    "blink"       => some(Blink),
+    "smile"       => some(Smile),
+    "shy"         => some(Shy),
+    "embarrassed" => some(Shy),
+    "bashful"     => some(Shy),
+    "excited"     => some(Excited),
+    "thrilled"    => some(Excited),
+    "laughing"    => some(Laughing),
+    "laugh"       => some(Laughing),
+    "amused"      => some(Laughing),
+    "giggle"      => some(Laughing),
+    "crying"      => some(Crying),
+    "cry"         => some(Crying),
+    "tears"       => some(Crying),
+    "smug"        => some(Smug),
+    "confident"   => some(Smug),
+    "proud"       => some(Smug),
+    "thinking"    => some(Thinking),
+    "curious"     => some(Thinking),
+    "pondering"   => some(Thinking),
+    "confused"    => some(Confused),
+    "puzzled"     => some(Confused),
+    "worried"     => some(Confused),
+    "pout"        => some(Pout),
+    "sulky"       => some(Pout),
+    "jealous"     => some(Pout),
+    "jitome"      => some(Jitome),
+    "bored"       => some(Jitome),
+    "flat"        => some(Jitome),
+    _             => none,
+  }
+
+// ── インラインタグ ───────────────────────────────────────────────────
+
+type Tag: Codec =
+  | EmotionTag(Emotion)
+  // fx 名は open set (プリセットは増える)。未知の fx は受信側で no-op。
+  | FxTag(String)
+  // 髪プリセット名はモデル依存の open set。未知は受信側で no-op。
+  | HairTag(String)
+  // [motion:...] / [sing:...] / [dance:...] — 認識はするがテキストから
+  // 除去するだけのタグ。kind はパース時に小文字化済み。
+  | ActionTag { kind: String, name: String }
+
+// `[` と `]` の間のタグ本体をパースする。
+// "happy" / "fx:nod" / "hair:short" / "motion:wave" を受け取る。
+// 未知の感情名・未知の kind は none (タグではないとみなす)。
+fn parse_tag_body(body: String) -> Option[Tag] = {
+  let trimmed = string.trim(body)
+  let parts = string.split(trimmed, ":")
+  if list.len(parts) <= 1 then
+    match emotion_from_tag(trimmed) {
+      some(e) => some(EmotionTag(e)),
+      none    => none,
+    }
+  else {
+    let kind = string.to_lower(string.trim(list.first(parts) ?? ""))
+    let rest = string.trim(string.join(list.drop(parts, 1), ":"))
+    match kind {
+      "fx"      => some(FxTag(rest)),
+      "hair"    => some(HairTag(rest)),
+      "motion"  => some(ActionTag { kind: kind, name: rest }),
+      "sing"    => some(ActionTag { kind: kind, name: rest }),
+      "singing" => some(ActionTag { kind: kind, name: rest }),
+      "dance"   => some(ActionTag { kind: kind, name: rest }),
+      _         => none,
+    }
+  }
+}
+
+// タグの正規表記 (角括弧込み)。parse_tag_body との round-trip が文法の定義。
+fn format_tag(t: Tag) -> String = match t {
+  EmotionTag(e)            => "[${emotion_to_tag(e)}]",
+  FxTag(name)              => "[fx:${name}]",
+  HairTag(name)            => "[hair:${name}]",
+  ActionTag { kind, name } => "[${kind}:${name}]",
+}
+
+// ── fx 語彙 (normative) ──────────────────────────────────────────────
+//
+// fx 名自体は open set だが、標準語彙はここで定義する。
+// 受信側は未知の fx 名を警告つき no-op とすること (エラーにしない)。
+
+// 顔オーバーレイ — 感情が強い時のみ。
+let FX_FACE: List[String] = [
+  "blush", "blush_strong", "blush_max", "sweat", "sweat_drop",
+  "heart", "hearts", "heart_eyes", "star", "star_eyes",
+  "sparkle", "flower", "xeyes", "dizzy", "knockout", "dead", "clear",
+]
+
+// 体ピーク — 感情の山で 1 回だけ。喜/怒/哀/楽。
+let FX_BODY_PEAK: List[String] = ["banzai", "rage", "slump", "relax"]
+
+// 会話ジェスチャ — 自然な相槌。同意/否定/疑問/知らない。
+let FX_GESTURE: List[String] = ["nod", "shake", "tilt", "shrug"]
+
+fn known_fx() -> List[String] = FX_FACE + FX_BODY_PEAK + FX_GESTURE
+
+fn is_known_fx(name: String) -> Bool =
+  list.contains(known_fx(), string.to_lower(string.trim(name)))
+
+// ── hair 語彙 (informative) ──────────────────────────────────────────
+//
+// 髪プリセットはアバターモデル定義 (morph セット) に従属するため契約上は
+// open set。以下は参考実装 (Lime/ラムネ系モデル) の語彙。
+
+let REFERENCE_HAIR_PRESETS: List[String] = [
+  "default", "reset", "long", "short", "straight",
+  "bangs_short", "bangs_long", "volume_up", "volume_down",
+  "twin_tail", "ahoge_off", "no_clip",
+]
+
+// ── in-file contract tests ───────────────────────────────────────────
+
+test "every canonical emotion tag roundtrips" {
+  for e in ALL_EMOTIONS {
+    assert_eq(emotion_from_tag(emotion_to_tag(e)), some(e))
+  }
+}
+
+test "aliases normalize to canonical emotions" {
+  assert_eq(emotion_from_tag("embarrassed"), some(Shy))
+  assert_eq(emotion_from_tag("LAUGH"), some(Laughing))
+  assert_eq(emotion_from_tag(" bored "), some(Jitome))
+  assert_eq(emotion_from_tag("nonsense"), none)
+}
+
+test "tag body grammar roundtrips" {
+  assert_eq(parse_tag_body("happy"), some(EmotionTag(Happy)))
+  assert_eq(parse_tag_body("fx:nod"), some(FxTag("nod")))
+  assert_eq(parse_tag_body("hair:short"), some(HairTag("short")))
+  assert_eq(parse_tag_body("motion:wave"), some(ActionTag { kind: "motion", name: "wave" }))
+  assert_eq(parse_tag_body("unknown:thing"), none)
+  assert_eq(format_tag(FxTag("nod")), "[fx:nod]")
+  assert_eq(format_tag(EmotionTag(Happy)), "[happy]")
+}
+
+test "fx vocabulary membership" {
+  assert(is_known_fx("nod"))
+  assert(is_known_fx("heart_eyes"))
+  assert(not is_known_fx("teleport"))
+}

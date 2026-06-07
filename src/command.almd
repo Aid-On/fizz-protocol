@@ -1,0 +1,198 @@
+// fizz_protocol.command — ワイヤコマンド契約。
+//
+// server / viewer / controller 間を流れるメッセージの全集合。
+// 旧 openaituber の protocol.ts (フラットな {type: ...} union) を
+// ドメイン別 5 変種に再編成したもの:
+//
+//   Avatar  — 表情 / ボーン / モーション (アバター描画部品が消費)
+//   Speech  — 発話 / マイク / 口パク同期 (voice 部品が消費)
+//   Scene   — 背景 / 照明 / カメラ (scene-renderer が消費)
+//   Overlay — コメント / カード / レイアウト (overlay UI が消費)
+//   Sync    — ping / 設定同期 / audio leader (hub 自身が消費)
+//
+// hub は Command を不透明に fan-out するだけ。受信側は自分のドメイン
+// だけ match して他は無視してよい。
+//
+// ワイヤ形式: json.stringify(Command.encode(c))
+//   例: {"tag":"Overlay","value":{"tag":"SetReply","value":{"text":"..."}}}
+
+import json
+import self.emotion
+import self.comment
+
+// ── avatar.* ─────────────────────────────────────────────────────────
+
+type AvatarCommand: Codec =
+  // 単一表情のウェイト設定。weight は 0..1。
+  | SetExpression { name: String, weight: Float }
+  // 複数表情の一括設定 (morph 名 → 0..1)。
+  | SetExpressions { values: Map[String, Float] }
+  // 視線。ラジアン。
+  | LookAt { yaw: Float, pitch: Float }
+  // 頭部回転。ラジアン、XYZ オイラー。
+  | SetHeadRotation { x: Float, y: Float, z: Float }
+  // 任意ボーン回転。ラジアン。
+  | SetBoneRotation { bone: String, x: Float, y: Float, z: Float }
+  // 名前付きモーションクリップ再生。
+  | PlayMotion { clip: String, looping: Bool }
+  // 手続き型リアクション (banzai / rage / nod / ...)。FBX なし・crossfade なし、
+  // 再生中モーションに加算合成。fx 語彙は emotion.FX_BODY_PEAK / FX_GESTURE。
+  | PlayProc { name: String }
+  // Mixamo FBX をリターゲットして再生。fade_ms 省略時はエンジン既定。
+  | PlayFbx { url: String, looping: Bool, fade_ms: Option[Int] }
+  | StopMotion { fade_ms: Option[Int] }
+  // 待機モーションのトグル。none = 現状維持。
+  | SetIdle { blink: Option[Bool], breath: Option[Bool], sway: Option[Bool] }
+  // 論理感情の適用。weight 省略時は 1.0。
+  | SetEmotion { name: emotion.Emotion, weight: Option[Float] }
+  // アバター状態の全リセット。
+  | ResetAvatar
+
+// ── speech.* ─────────────────────────────────────────────────────────
+
+type SpeechCommand: Codec =
+  // URL の音声を再生 + リップシンク。
+  | Speak { url: String }
+  | StopSpeak
+  | SetMic { enabled: Bool }
+  // audio leader → 他 viewer への口パク値ブロードキャスト (~30fps)。
+  // 値は RMS 正規化済み 0..1。leader だけが実再生 + 解析する設計のため、
+  // 非リーダータブはこの値で口を動かす。
+  | MouthOpen { value: Float }
+
+// ── scene.* ──────────────────────────────────────────────────────────
+
+type BackgroundMode: Codec, Repr =
+  | Transparent
+  | SolidColor
+  | Image
+
+type CameraPreset: Codec, Repr =
+  | Face
+  | Upper
+  | Full
+
+type SceneCommand: Codec =
+  // mode = SolidColor のとき color、Image のとき image_url が必須。
+  | SetBackground { mode: BackgroundMode, color: Option[String], image_url: Option[String] }
+  // none のフィールドは現状維持。
+  | SetLighting {
+      ambient_intensity: Option[Float],
+      directional_intensity: Option[Float],
+      ambient_color: Option[String],
+      directional_color: Option[String],
+    }
+  | SetGrid { visible: Bool }
+  // duration_ms 省略時はエンジン既定の tween 時間。
+  | SetCamera { preset: CameraPreset, duration_ms: Option[Int] }
+
+// ── overlay.* ────────────────────────────────────────────────────────
+
+type LayoutMode: Codec, Repr =
+  // 横 16:9 標準。
+  | Standard
+  | Stream
+  | Subscribe
+  // 縦 9:16 配信。
+  | Vertical
+
+type OverlayCommand: Codec =
+  // チャットフィードへ 1 コメント追加。Comment.id で dedupe。
+  | PushComment(comment.Comment)
+  // 「いま読んでいる」コメントのハイライト + reading-card 表示。
+  | SetReadingComment { id: Option[String], user: Option[String], text: String }
+  // AI 返答カードのテキスト。
+  | SetReply { text: String }
+  // 障害時フォールバック画像。none で解除。
+  | SetFallback { url: Option[String] }
+  // オープニング演出 (画像/動画 URL)。none で解除。
+  | SetOpening { url: Option[String], duration_ms: Option[Int] }
+  | SetLayout { mode: LayoutMode }
+  // 配信境界のリセット: フィード / カード / 会話履歴をクリアする。
+  // 永続記憶 (memory DB) はこのコマンドでは触らない。
+  | ClearBroadcast
+
+// ── sync.* ───────────────────────────────────────────────────────────
+
+type SyncCommand: Codec =
+  | Ping { id: Option[String] }
+  // 設定変更の全クライアント伝播。value_json は値の JSON テキスト
+  // (受信側は cache 更新のみ — 再永続化しない)。deleted = true で削除。
+  | SettingChanged { scope: String, key: String, value_json: Option[String], deleted: Bool }
+  // サーバ選出の audio leader 通知。is_you は受信ソケット自身が
+  // leader かどうか。leader だけが BGM / TTS を実再生する。
+  | AudioLeader { is_you: Bool }
+
+// ── top-level ────────────────────────────────────────────────────────
+
+type Command: Codec =
+  | Avatar(AvatarCommand)
+  | Speech(SpeechCommand)
+  | Scene(SceneCommand)
+  | Overlay(OverlayCommand)
+  | Sync(SyncCommand)
+
+type Response: Codec =
+  | Pong { id: Option[String] }
+  | Ack { for_cmd: String, ok: Bool, error: Option[String] }
+  | StateSnapshot { expressions: List[String], bones: List[String] }
+
+// ── ワイヤ変換ヘルパ ─────────────────────────────────────────────────
+
+fn command_to_json(c: Command) -> String = json.stringify(Command.encode(c))
+
+fn command_from_json(text: String) -> Result[Command, String] =
+  match json.parse(text) {
+    ok(v)  => Command.decode(v),
+    err(e) => err(e),
+  }
+
+fn response_to_json(r: Response) -> String = json.stringify(Response.encode(r))
+
+fn response_from_json(text: String) -> Result[Response, String] =
+  match json.parse(text) {
+    ok(v)  => Response.decode(v),
+    err(e) => err(e),
+  }
+
+// ── in-file contract tests ───────────────────────────────────────────
+
+test "avatar command json roundtrips" {
+  let c = Avatar(SetEmotion { name: emotion.Happy, weight: some(0.8) })
+  assert_eq(command_from_json(command_to_json(c)), ok(c))
+}
+
+test "overlay comment command json roundtrips" {
+  let c = Overlay(PushComment(comment.Comment {
+    id: "yt-42",
+    user: "viewer",
+    text: "かわいい！",
+    color: none,
+    source: comment.Youtube,
+  }))
+  assert_eq(command_from_json(command_to_json(c)), ok(c))
+}
+
+test "sync setting command json roundtrips" {
+  let c = Sync(SettingChanged {
+    scope: "overlay:vertical",
+    key: "reply_card_y",
+    value_json: some("0.42"),
+    deleted: false,
+  })
+  assert_eq(command_from_json(command_to_json(c)), ok(c))
+}
+
+test "speech mouth value json roundtrips" {
+  let c = Speech(MouthOpen { value: 0.35 })
+  assert_eq(command_from_json(command_to_json(c)), ok(c))
+}
+
+test "response json roundtrips" {
+  let r = Ack { for_cmd: "SetReply", ok: true, error: none }
+  assert_eq(response_from_json(response_to_json(r)), ok(r))
+}
+
+test "malformed json is rejected" {
+  assert_eq(result.is_err(command_from_json("not json")), true)
+}

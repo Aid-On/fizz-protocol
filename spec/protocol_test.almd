@@ -1,0 +1,32 @@
+// Cross-module contract tests — 消費側 (他部品) と同じ目線で
+// モジュール越しに契約を使えることを確認する。
+
+import self.emotion
+import self.comment
+import self.command
+
+test "consumer can resolve emotions through the module boundary" {
+  assert_eq(emotion.emotion_from_tag("happy"), some(emotion.Happy))
+  assert_eq(emotion.emotion_to_tag(emotion.Jitome), "jitome")
+}
+
+test "consumer can parse fx tags through the module boundary" {
+  assert_eq(emotion.parse_tag_body("fx:shrug"), some(emotion.FxTag("shrug")))
+  assert(emotion.is_known_fx("shrug"))
+}
+
+test "all canonical emotions are listed exactly once" {
+  assert_eq(list.len(emotion.ALL_EMOTIONS), 21)
+}
+
+test "consumer can roundtrip a command via json helpers" {
+  let c = command.Speech(command.MouthOpen { value: 0.5 })
+  let wire = command.command_to_json(c)
+  assert_eq(command.command_from_json(wire), ok(c))
+}
+
+test "wire format is tagged json" {
+  let wire = command.command_to_json(command.Overlay(command.ClearBroadcast))
+  assert(string.contains(wire, "Overlay"))
+  assert(string.contains(wire, "ClearBroadcast"))
+}

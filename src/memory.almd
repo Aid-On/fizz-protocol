@@ -1,0 +1,171 @@
+// fizz_protocol.memory — 記憶系の契約。
+//
+// memory 部品群 (L1 ring / L2 events / L3 summarizer / recall-gate) と
+// brain の境界を流れる型。旧 openaituber の server/memory/store.ts と
+// chat/memoryClient.ts の型を統合・正規化したもの。
+//
+// 時刻はすべて unix epoch ミリ秒 (Int)。
+
+type MemoryRole: Codec, Repr =
+  // 視聴者の発言。
+  | User
+  // キャラクターの返答。
+  | Assistant
+  // キャラクターの独白・自己メモ (旧 "self")。
+  | SelfNote
+
+type MemoryEvent: Codec = {
+  id: Int,
+  user_id: Int,
+  session_id: Option[Int],
+  role: MemoryRole,
+  content: String,
+  ts: Int,
+  // 旧実装は CSV 文字列だったが、契約上は構造化リスト。
+  tags: List[String],
+}
+
+type MemoryUser: Codec = {
+  id: Int,
+  // 表示名ベースの識別 (将来 external_id 列で ID 体系化予定)。
+  name: String,
+  first_seen: Int,
+  last_seen: Int,
+  message_count: Int,
+  // L3 rolling 要約。未要約は none。
+  summary: Option[String],
+  summary_updated_at: Option[Int],
+}
+
+// 配信セッション (配信境界の明示化)。
+type MemorySession: Codec = {
+  id: Int,
+  started_at: Int,
+  ended_at: Option[Int],
+  persona: String,
+  // 配信終了時に非同期で埋まる要約。
+  summary: Option[String],
+  title: Option[String],
+}
+
+// 過去配信における特定ユーザの参加スケッチ。
+type SessionParticipation: Codec = {
+  session_id: Int,
+  started_at: Int,
+  ended_at: Option[Int],
+  title: Option[String],
+  user_msg_count: Int,
+  first_ts_in_session: Int,
+  last_ts_in_session: Int,
+  session_summary: Option[String],
+}
+
+// コメント間隔の偏り。
+type Burstiness: Codec, Repr =
+  | Burst
+  | EvenPace
+  | Sparse
+  | NoBurstData
+
+// 直近のコメントテンポ変化。
+type RecentTempo: Codec, Repr =
+  | RampingUp
+  | Cooling
+  | Steady
+  | NoTempoData
+
+// コメントの性格分類。
+type EngagementTone: Codec, Repr =
+  | Reactive
+  | Questioning
+  | Narrative
+  | Mixed
+
+// 当該セッション内でのユーザの振る舞い統計。
+type SessionEngagement: Codec = {
+  msg_count: Int,
+  first_ts: Option[Int],
+  last_ts: Option[Int],
+  avg_len: Float,
+  max_len: Int,
+  interval_median_ms: Option[Int],
+  burstiness: Burstiness,
+  recent_tempo: RecentTempo,
+  reaction_rate: Option[Float],
+  question_rate: Option[Float],
+  tone: Option[EngagementTone],
+}
+
+// 出席パターンのフレーバ。
+type AttendanceFlavor: Codec, Repr =
+  | FirstTime
+  | Regular
+  | Occasional
+  | LongAbsent
+  | FreshReturn
+
+type PastSessionsSummary: Codec = {
+  sessions_attended_recent: Int,
+  sessions_considered_recent: Int,
+  last_session_gap_ms: Option[Int],
+  last_session_msg_count: Option[Int],
+  attendance_flavor: AttendanceFlavor,
+  last_session_summary: Option[String],
+}
+
+// recall (hot path, デッドライン付き) の戻り値。
+// brain はこれを preamble 生成の素材として使う。
+// 注意: 会話は前の話題を引きずらない方針のため、brain 側で使うのは
+// summary + 直近わずか — recall 全量をプロンプトに流し込まないこと。
+type RecallResult: Codec = {
+  user: MemoryUser,
+  recent: List[MemoryEvent],
+  is_returning: Bool,
+  days_since_last_seen: Int,
+  session_user_count: Int,
+  session_started_at: Option[Int],
+  total_user_count: Int,
+  past_sessions: Option[PastSessionsSummary],
+  recent_sessions: List[SessionParticipation],
+  engagement: Option[SessionEngagement],
+}
+
+// ── in-file contract tests ───────────────────────────────────────────
+
+test "memory event codec roundtrips" {
+  let e = MemoryEvent {
+    id: 1,
+    user_id: 7,
+    session_id: some(3),
+    role: User,
+    content: "今日も来たよ",
+    ts: 1780000000000,
+    tags: ["greeting"],
+  }
+  assert_eq(MemoryEvent.decode(MemoryEvent.encode(e)), ok(e))
+}
+
+test "recall result codec roundtrips" {
+  let u = MemoryUser {
+    id: 7,
+    name: "viewer",
+    first_seen: 1770000000000,
+    last_seen: 1780000000000,
+    message_count: 42,
+    summary: some("常連。猫の話が好き。"),
+    summary_updated_at: some(1779000000000),
+  }
+  let r = RecallResult {
+    user: u,
+    recent: [],
+    is_returning: true,
+    days_since_last_seen: 3,
+    session_user_count: 5,
+    session_started_at: some(1780000000000),
+    total_user_count: 120,
+    past_sessions: none,
+    recent_sessions: [],
+    engagement: none,
+  }
+  assert_eq(RecallResult.decode(RecallResult.encode(r)), ok(r))
+}

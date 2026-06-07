@@ -1,0 +1,46 @@
+// fizz_protocol.speak — 発話単位の契約。
+//
+// brain (LLM ストリーム → 文切り出し) と voice (TTS → 再生キュー) の
+// 境界を流れる型。SentenceFragment は「テキストの世界」の出力、
+// SpeakItem は TTS 済みの「音声の世界」の入力。
+
+import bytes
+import self.emotion
+
+// LLM ストリームから切り出された 1 文 + 付随タグ。
+// stream-sentence-parser (brain 部品) の出力型。
+type SentenceFragment: Codec = {
+  emotion: emotion.Emotion,
+  // タグ除去済みの本文。
+  message: String,
+  // [hair:NAME] タグ由来。発話再生の直前に適用して声と同期させる。
+  hair: Option[String],
+  // [fx:NAME] タグ由来。発話の間だけ感情に重畳するリアクション。
+  fx: Option[String],
+}
+
+// TTS 合成済みの再生 1 単位。speak-queue (voice 部品) の入力型。
+// audio は生バイト列のためシリアライズ境界を越えない (in-process 契約)。
+// ワイヤを越える場合は URL 化して command.Speak を使うこと。
+type SpeakItem = {
+  audio: Bytes,
+  // 例: "audio/mpeg" (Aivis) / "audio/wav" (VOICEVOX)。
+  mime: String,
+  // 再生中に reply-card 等へ出す表示用テキスト。
+  text: String,
+  emotion: emotion.Emotion,
+  hair: Option[String],
+  fx: Option[String],
+}
+
+// ── in-file contract tests ───────────────────────────────────────────
+
+test "sentence fragment codec roundtrips" {
+  let f = SentenceFragment {
+    emotion: emotion.Excited,
+    message: "やったー！ありがとう！",
+    hair: none,
+    fx: some("banzai"),
+  }
+  assert_eq(SentenceFragment.decode(SentenceFragment.encode(f)), ok(f))
+}

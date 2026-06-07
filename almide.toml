@@ -1,0 +1,4 @@
+[package]
+name = "fizz_protocol"
+version = "0.1.0"
+description = "Fizz AITuber system — shared wire contracts: commands, comments, speech items, emotion-tag grammar, memory events"

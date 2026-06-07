@@ -1,0 +1,22 @@
+// fizz_protocol — Fizz AITuber システムの共有ワイヤ契約。
+//
+// すべての Fizz 部品 (source / brain / voice / avatar / hub / overlay) は
+// このパッケージの型にだけ依存して互いに通信する。部品同士が直接
+// 依存し合うことはない — 契約が唯一の合意点。
+//
+// モジュール構成:
+//   fizz_protocol.emotion  — 感情語彙とインラインタグ文法 ([happy] / [fx:nod] / [hair:short])
+//   fizz_protocol.comment  — 正規化コメント (全チャットソースの出力型)
+//   fizz_protocol.speak    — 発話単位 (SentenceFragment / SpeakItem)
+//   fizz_protocol.command  — ワイヤコマンド (avatar / speech / scene / overlay / sync) と Response
+//   fizz_protocol.memory   — 記憶イベント / ユーザ / セッション / recall 結果
+//
+// ワイヤ形式は Almide の deriving Codec が生成する tagged JSON:
+//   {"tag": "<ctor>", "value": {<fields>}}
+// 旧 openaituber の {"type": "...", ...} フラット形式とは互換しない (Fizz は新契約)。
+
+// 契約バージョン。breaking change は minor を上げる (0.x 系は minor = major 扱い)。
+let VERSION = "0.1.0"
+
+// WebSocket ハブの既定ポート (旧 openaituber と同じ)。
+let DEFAULT_WS_PORT = 8787

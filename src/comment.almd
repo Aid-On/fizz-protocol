@@ -1,0 +1,44 @@
+// fizz_protocol.comment — 正規化コメント。
+//
+// すべてのチャットソース部品 (fizz-source-youtube / fizz-source-twitch /
+// fizz-source-x / 手入力) はこの型に正規化して下流へ流す。
+// ソースを増やしても下流 (dedupe / classifier / brain / overlay) は不変。
+
+type CommentSource: Codec, Repr =
+  | Youtube
+  | Twitch
+  // X (旧 Twitter) のメンション経由。
+  | XMention
+  // 運用者の手入力。
+  | Manual
+  // テスト・シミュレータ注入。
+  | Synthetic
+
+type Comment: Codec = {
+  // ソース側で一意な ID。dedupe フィルタはこの値で重複排除する。
+  id: String,
+  // 表示名 (記憶系のユーザ識別にも使われる — 将来 external_id 化予定)。
+  user: String,
+  text: String,
+  // メンバーシップ等による表示色 (CSS color)。
+  color: Option[String],
+  source: CommentSource,
+}
+
+// ── in-file contract tests ───────────────────────────────────────────
+
+test "comment codec roundtrips" {
+  let c = Comment {
+    id: "yt-001",
+    user: "viewer",
+    text: "こんにちは！",
+    color: some("#ff66aa"),
+    source: Youtube,
+  }
+  assert_eq(Comment.decode(Comment.encode(c)), ok(c))
+}
+
+test "comment codec roundtrips with absent color" {
+  let c = Comment { id: "m-1", user: "op", text: "test", color: none, source: Manual }
+  assert_eq(Comment.decode(Comment.encode(c)), ok(c))
+}
