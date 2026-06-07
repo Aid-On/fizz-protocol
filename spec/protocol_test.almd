@@ -1,9 +1,13 @@
 // Cross-module contract tests — 消費側 (他部品) と同じ目線で
 // モジュール越しに契約を使えることを確認する。
+// レコード付きバリアントのモジュール越し構築は almide が未対応のため、
+// ワイヤテキスト起点 + モジュールのヘルパ関数経由でテストする。
 
 import self.emotion
 import self.comment
 import self.command
+import self.speak
+import self.memory
 
 test "consumer can resolve emotions through the module boundary" {
   assert_eq(emotion.emotion_from_tag("happy"), some(emotion.Happy))
@@ -19,14 +23,56 @@ test "all canonical emotions are listed exactly once" {
   assert_eq(list.len(emotion.ALL_EMOTIONS), 21)
 }
 
-test "consumer can roundtrip a command via json helpers" {
-  let c = command.Speech(command.MouthOpen { value: 0.5 })
-  let wire = command.command_to_json(c)
-  assert_eq(command.command_from_json(wire), ok(c))
+test "consumer can build and roundtrip a comment" {
+  let c = comment.Comment {
+    id: "yt-1",
+    user: "viewer",
+    text: "こんにちは",
+    color: none,
+    source: comment.Youtube,
+  }
+  assert_eq(comment.comment_from_json(comment.comment_to_json(c)), ok(c))
 }
 
-test "wire format is tagged json" {
-  let wire = command.command_to_json(command.Overlay(command.ClearBroadcast))
-  assert(string.contains(wire, "Overlay"))
-  assert(string.contains(wire, "ClearBroadcast"))
+test "consumer can roundtrip a command from wire text" {
+  let wire = "{\"domain\":\"speech\",\"type\":\"mouthOpen\",\"value\":0.5}"
+  match command.command_from_json(wire) {
+    ok(c)  => assert_eq(command.command_from_json(command.command_to_json(c)), ok(c)),
+    err(e) => { eprintln(e); assert(false) },
+  }
+}
+
+test "wire format carries domain and type" {
+  let wire = "{\"domain\":\"overlay\",\"type\":\"clearBroadcast\"}"
+  match command.command_from_json(wire) {
+    ok(c) => {
+      let encoded = command.command_to_json(c)
+      assert(string.contains(encoded, "\"domain\":\"overlay\""))
+      assert(string.contains(encoded, "\"type\":\"clearBroadcast\""))
+    },
+    err(e) => { eprintln(e); assert(false) },
+  }
+}
+
+test "consumer can roundtrip a sentence fragment from wire text" {
+  match speak.fragment_from_json("{\"emotion\":\"shy\",\"message\":\"え、急に？\",\"fx\":\"blush\"}") {
+    ok(f)  => assert_eq(speak.fragment_from_json(speak.fragment_to_json(f)), ok(f)),
+    err(e) => { eprintln(e); assert(false) },
+  }
+}
+
+test "consumer can roundtrip a memory event" {
+  let e = memory.MemoryEvent {
+    id: 1, user_id: 7, session_id: none, role: memory.Assistant,
+    content: "おかえり！", ts: 1780000000000, tags: ["greeting"],
+  }
+  assert_eq(memory.event_from_json(memory.event_to_json(e)), ok(e))
+}
+
+test "embedded comment survives the overlay command wire" {
+  let wire = "{\"domain\":\"overlay\",\"type\":\"comment\",\"comment\":{\"id\":\"tw-1\",\"user\":\"v\",\"text\":\"hi\",\"color\":\"#fff\",\"source\":\"twitch\"}}"
+  match command.command_from_json(wire) {
+    ok(c)  => assert_eq(command.command_from_json(command.command_to_json(c)), ok(c)),
+    err(e) => { eprintln(e); assert(false) },
+  }
 }

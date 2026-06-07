@@ -7,10 +7,15 @@
 //
 // ソース部品の標準出力形式は NDJSON (1 行 1 コメント、comment_to_json)。
 // `fizz-youtube-chat-source | fizz-comment-dedupe | ...` とパイプで合成する。
+//
+// ワイヤ形式 (手書きコーデックが正):
+//   {"id":"yt-1","user":"viewer","text":"こんにちは","source":"youtube"}
+//   {"id":"tw-9","user":"v","text":"hi","color":"#FF69B4","source":"twitch"}
+// color は none のときキー自体を省略する。
 
 import json
 
-type CommentSource: Codec, Repr =
+type CommentSource =
   | Youtube
   | Twitch
   // X (旧 Twitter) のメンション経由。
@@ -20,7 +25,7 @@ type CommentSource: Codec, Repr =
   // テスト・シミュレータ注入。
   | Synthetic
 
-type Comment: Codec = {
+type Comment = {
   // ソース側で一意な ID。dedupe フィルタはこの値で重複排除する。
   id: String,
   // 表示名 (記憶系のユーザ識別にも使われる — 将来 external_id 化予定)。
@@ -31,24 +36,68 @@ type Comment: Codec = {
   source: CommentSource,
 }
 
-// ── ワイヤ変換ヘルパ (NDJSON 1 行分) ─────────────────────────────────
+// ── source 文字列表現 ────────────────────────────────────────────────
 
-fn comment_to_json(c: Comment) -> String = json.stringify(Comment.encode(c))
+fn source_to_string(s: CommentSource) -> String = match s {
+  Youtube   => "youtube",
+  Twitch    => "twitch",
+  XMention  => "x_mention",
+  Manual    => "manual",
+  Synthetic => "synthetic",
+}
+
+fn source_from_string(s: String) -> Result[CommentSource, String] = match s {
+  "youtube"   => ok(Youtube),
+  "twitch"    => ok(Twitch),
+  "x_mention" => ok(XMention),
+  "manual"    => ok(Manual),
+  "synthetic" => ok(Synthetic),
+  _           => err("unknown comment source: ${s}"),
+}
+
+// ── ワイヤコーデック (手書きが契約の正) ──────────────────────────────
+
+fn comment_encode(c: Comment) -> Value = {
+  let base = [
+    ("id", value.str(c.id)),
+    ("user", value.str(c.user)),
+    ("text", value.str(c.text)),
+  ]
+  let with_color = match c.color {
+    some(col) => base + [("color", value.str(col))],
+    none      => base,
+  }
+  value.object(with_color + [("source", value.str(source_to_string(c.source)))])
+}
+
+fn comment_decode(v: Value) -> Result[Comment, String] = {
+  let id = result.unwrap_or(value.as_string(value.get(v, "id") ?? value.null()), "")
+  guard id != "" else err("comment: missing id")
+  let user = result.unwrap_or(value.as_string(value.get(v, "user") ?? value.null()), "")
+  guard user != "" else err("comment: missing user")
+  let text = result.unwrap_or(value.as_string(value.get(v, "text") ?? value.null()), "")
+  guard text != "" else err("comment: missing text")
+  let color = result.to_option(value.as_string(value.get(v, "color") ?? value.null()))
+  let src_str = result.unwrap_or(value.as_string(value.get(v, "source") ?? value.null()), "")
+  match source_from_string(src_str) {
+    err(e)  => err(e),
+    ok(src) => ok(Comment { id: id, user: user, text: text, color: color, source: src }),
+  }
+}
+
+// ── NDJSON 1 行分 ────────────────────────────────────────────────────
+
+fn comment_to_json(c: Comment) -> String = json.stringify(comment_encode(c))
 
 fn comment_from_json(text: String) -> Result[Comment, String] =
   match json.parse(text) {
-    ok(v)  => Comment.decode(v),
+    ok(v)  => comment_decode(v),
     err(e) => err(e),
   }
 
 // ── in-file contract tests ───────────────────────────────────────────
 
-test "comment json line roundtrips" {
-  let c = Comment { id: "tw-9", user: "viewer", text: "それな", color: none, source: Twitch }
-  assert_eq(comment_from_json(comment_to_json(c)), ok(c))
-}
-
-test "comment codec roundtrips" {
+test "comment json line roundtrips with color" {
   let c = Comment {
     id: "yt-001",
     user: "viewer",
@@ -56,10 +105,36 @@ test "comment codec roundtrips" {
     color: some("#ff66aa"),
     source: Youtube,
   }
-  assert_eq(Comment.decode(Comment.encode(c)), ok(c))
+  assert_eq(comment_from_json(comment_to_json(c)), ok(c))
 }
 
-test "comment codec roundtrips with absent color" {
+test "comment json line roundtrips without color" {
   let c = Comment { id: "m-1", user: "op", text: "test", color: none, source: Manual }
-  assert_eq(Comment.decode(Comment.encode(c)), ok(c))
+  assert_eq(comment_from_json(comment_to_json(c)), ok(c))
+}
+
+test "wire shape is flat and color key is omitted when absent" {
+  let c = Comment { id: "tw-9", user: "v", text: "hi", color: none, source: Twitch }
+  let wire = comment_to_json(c)
+  assert(string.contains(wire, "\"source\":\"twitch\""))
+  assert(not string.contains(wire, "color"))
+}
+
+test "decoding a hand-authored wire line" {
+  let wire = "{\"id\":\"x-1\",\"user\":\"fan\",\"text\":\"やあ\",\"source\":\"x_mention\"}"
+  assert_eq(comment_from_json(wire), ok(Comment {
+    id: "x-1", user: "fan", text: "やあ", color: none, source: XMention,
+  }))
+}
+
+test "missing required fields and unknown sources are rejected" {
+  assert(result.is_err(comment_from_json("{\"user\":\"u\",\"text\":\"t\",\"source\":\"manual\"}")))
+  assert(result.is_err(comment_from_json("{\"id\":\"1\",\"user\":\"u\",\"text\":\"t\",\"source\":\"telepathy\"}")))
+  assert(result.is_err(comment_from_json("not json")))
+}
+
+test "every source name roundtrips" {
+  for s in [Youtube, Twitch, XMention, Manual, Synthetic] {
+    assert_eq(source_from_string(source_to_string(s)), ok(s))
+  }
 }

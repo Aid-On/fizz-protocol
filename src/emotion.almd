@@ -15,7 +15,7 @@
 // 拡張側はアバター側で blendshape の組み合わせ (EMOTION_CHANNELS) に
 // 解決される前提の論理感情。未知のタグは none → 呼び出し側が Neutral に倒す。
 
-type Emotion: Codec, Repr =
+type Emotion =
   | Neutral
   | Happy
   | Angry
@@ -118,7 +118,7 @@ fn emotion_from_tag(tag: String) -> Option[Emotion] =
 
 // ── インラインタグ ───────────────────────────────────────────────────
 
-type Tag: Codec =
+type Tag =
   | EmotionTag(Emotion)
   // fx 名は open set (プリセットは増える)。未知の fx は受信側で no-op。
   | FxTag(String)

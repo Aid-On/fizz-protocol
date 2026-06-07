@@ -3,13 +3,18 @@
 // brain (LLM ストリーム → 文切り出し) と voice (TTS → 再生キュー) の
 // 境界を流れる型。SentenceFragment は「テキストの世界」の出力、
 // SpeakItem は TTS 済みの「音声の世界」の入力。
+//
+// SentenceFragment のワイヤ形式 (手書きコーデックが正):
+//   {"emotion":"happy","message":"わかるー","fx":"nod"}
+// hair / fx は none のときキー省略。emotion は emotion_to_tag の文字列。
 
+import json
 import bytes
 import self.emotion
 
 // LLM ストリームから切り出された 1 文 + 付随タグ。
 // stream-sentence-parser (brain 部品) の出力型。
-type SentenceFragment: Codec = {
+type SentenceFragment = {
   emotion: emotion.Emotion,
   // タグ除去済みの本文。
   message: String,
@@ -21,7 +26,7 @@ type SentenceFragment: Codec = {
 
 // TTS 合成済みの再生 1 単位。speak-queue (voice 部品) の入力型。
 // audio は生バイト列のためシリアライズ境界を越えない (in-process 契約)。
-// ワイヤを越える場合は URL 化して command.Speak を使うこと。
+// ワイヤを越える場合は URL 化して command の speak を使うこと。
 type SpeakItem = {
   audio: Bytes,
   // 例: "audio/mpeg" (Aivis) / "audio/wav" (VOICEVOX)。
@@ -33,14 +38,65 @@ type SpeakItem = {
   fx: Option[String],
 }
 
+// ── SentenceFragment ワイヤコーデック ────────────────────────────────
+
+fn fragment_encode(f: SentenceFragment) -> Value = {
+  let base = [
+    ("emotion", value.str(emotion.emotion_to_tag(f.emotion))),
+    ("message", value.str(f.message)),
+  ]
+  let with_hair = match f.hair {
+    some(h) => base + [("hair", value.str(h))],
+    none    => base,
+  }
+  let with_fx = match f.fx {
+    some(x) => with_hair + [("fx", value.str(x))],
+    none    => with_hair,
+  }
+  value.object(with_fx)
+}
+
+fn fragment_decode(v: Value) -> Result[SentenceFragment, String] = {
+  let message = result.unwrap_or(value.as_string(value.get(v, "message") ?? value.null()), "")
+  guard message != "" else err("fragment: missing message")
+  let tag = result.unwrap_or(value.as_string(value.get(v, "emotion") ?? value.null()), "neutral")
+  // 未知の感情タグは契約どおり Neutral に倒す (エラーにしない)。
+  let emo = emotion.emotion_from_tag(tag) ?? emotion.Neutral
+  ok(SentenceFragment {
+    emotion: emo,
+    message: message,
+    hair: result.to_option(value.as_string(value.get(v, "hair") ?? value.null())),
+    fx: result.to_option(value.as_string(value.get(v, "fx") ?? value.null())),
+  })
+}
+
+fn fragment_to_json(f: SentenceFragment) -> String = json.stringify(fragment_encode(f))
+
+fn fragment_from_json(text: String) -> Result[SentenceFragment, String] =
+  match json.parse(text) {
+    ok(v)  => fragment_decode(v),
+    err(e) => err(e),
+  }
+
 // ── in-file contract tests ───────────────────────────────────────────
 
-test "sentence fragment codec roundtrips" {
+test "sentence fragment roundtrips" {
   let f = SentenceFragment {
     emotion: emotion.Excited,
     message: "やったー！ありがとう！",
     hair: none,
     fx: some("banzai"),
   }
-  assert_eq(SentenceFragment.decode(SentenceFragment.encode(f)), ok(f))
+  assert_eq(fragment_from_json(fragment_to_json(f)), ok(f))
+}
+
+test "unknown emotion tag falls back to neutral" {
+  match fragment_from_json("{\"emotion\":\"telepathy\",\"message\":\"m\"}") {
+    ok(f)  => assert_eq(f.emotion, emotion.Neutral),
+    err(_) => assert(false),
+  }
+}
+
+test "missing message is rejected" {
+  assert(result.is_err(fragment_from_json("{\"emotion\":\"happy\"}")))
 }

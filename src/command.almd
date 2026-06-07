@@ -13,8 +13,11 @@
 // hub は Command を不透明に fan-out するだけ。受信側は自分のドメイン
 // だけ match して他は無視してよい。
 //
-// ワイヤ形式: json.stringify(Command.encode(c))
-//   例: {"tag":"Overlay","value":{"tag":"SetReply","value":{"text":"..."}}}
+// ワイヤ形式 (手書きコーデックが正。フラット JSON):
+//   {"domain":"avatar","type":"setEmotion","name":"happy","weight":0.8}
+//   {"domain":"overlay","type":"clearBroadcast"}
+// Option フィールドは none のときキー省略。enum は文字列
+// (emotion は emotion_to_tag、mode/preset は本ファイルの *_to_string)。
 
 import json
 import self.emotion
@@ -22,7 +25,7 @@ import self.comment
 
 // ── avatar.* ─────────────────────────────────────────────────────────
 
-type AvatarCommand: Codec =
+type AvatarCommand =
   // 単一表情のウェイト設定。weight は 0..1。
   | SetExpression { name: String, weight: Float }
   // 複数表情の一括設定 (morph 名 → 0..1)。
@@ -36,7 +39,7 @@ type AvatarCommand: Codec =
   // 名前付きモーションクリップ再生。
   | PlayMotion { clip: String, looping: Bool }
   // 手続き型リアクション (banzai / rage / nod / ...)。FBX なし・crossfade なし、
-  // 再生中モーションに加算合成。fx 語彙は emotion.FX_BODY_PEAK / FX_GESTURE。
+  // 再生中モーションに加算合成。語彙は emotion.FX_BODY_PEAK / FX_GESTURE。
   | PlayProc { name: String }
   // Mixamo FBX をリターゲットして再生。fade_ms 省略時はエンジン既定。
   | PlayFbx { url: String, looping: Bool, fade_ms: Option[Int] }
@@ -50,7 +53,7 @@ type AvatarCommand: Codec =
 
 // ── speech.* ─────────────────────────────────────────────────────────
 
-type SpeechCommand: Codec =
+type SpeechCommand =
   // URL の音声を再生 + リップシンク。
   | Speak { url: String }
   | StopSpeak
@@ -62,17 +65,43 @@ type SpeechCommand: Codec =
 
 // ── scene.* ──────────────────────────────────────────────────────────
 
-type BackgroundMode: Codec, Repr =
+type BackgroundMode =
   | Transparent
   | SolidColor
   | Image
 
-type CameraPreset: Codec, Repr =
+fn background_mode_to_string(m: BackgroundMode) -> String = match m {
+  Transparent => "transparent",
+  SolidColor  => "color",
+  Image       => "image",
+}
+
+fn background_mode_from_string(s: String) -> Result[BackgroundMode, String] = match s {
+  "transparent" => ok(Transparent),
+  "color"       => ok(SolidColor),
+  "image"       => ok(Image),
+  _             => err("unknown background mode: ${s}"),
+}
+
+type CameraPreset =
   | Face
   | Upper
   | Full
 
-type SceneCommand: Codec =
+fn camera_preset_to_string(p: CameraPreset) -> String = match p {
+  Face  => "face",
+  Upper => "upper",
+  Full  => "full",
+}
+
+fn camera_preset_from_string(s: String) -> Result[CameraPreset, String] = match s {
+  "face"  => ok(Face),
+  "upper" => ok(Upper),
+  "full"  => ok(Full),
+  _       => err("unknown camera preset: ${s}"),
+}
+
+type SceneCommand =
   // mode = SolidColor のとき color、Image のとき image_url が必須。
   | SetBackground { mode: BackgroundMode, color: Option[String], image_url: Option[String] }
   // none のフィールドは現状維持。
@@ -88,7 +117,7 @@ type SceneCommand: Codec =
 
 // ── overlay.* ────────────────────────────────────────────────────────
 
-type LayoutMode: Codec, Repr =
+type LayoutMode =
   // 横 16:9 標準。
   | Standard
   | Stream
@@ -96,7 +125,22 @@ type LayoutMode: Codec, Repr =
   // 縦 9:16 配信。
   | Vertical
 
-type OverlayCommand: Codec =
+fn layout_mode_to_string(m: LayoutMode) -> String = match m {
+  Standard  => "standard",
+  Stream    => "stream",
+  Subscribe => "subscribe",
+  Vertical  => "vertical",
+}
+
+fn layout_mode_from_string(s: String) -> Result[LayoutMode, String] = match s {
+  "standard"  => ok(Standard),
+  "stream"    => ok(Stream),
+  "subscribe" => ok(Subscribe),
+  "vertical"  => ok(Vertical),
+  _           => err("unknown layout mode: ${s}"),
+}
+
+type OverlayCommand =
   // チャットフィードへ 1 コメント追加。Comment.id で dedupe。
   | PushComment(comment.Comment)
   // 「いま読んでいる」コメントのハイライト + reading-card 表示。
@@ -114,7 +158,7 @@ type OverlayCommand: Codec =
 
 // ── sync.* ───────────────────────────────────────────────────────────
 
-type SyncCommand: Codec =
+type SyncCommand =
   | Ping { id: Option[String] }
   // 設定変更の全クライアント伝播。value_json は値の JSON テキスト
   // (受信側は cache 更新のみ — 再永続化しない)。deleted = true で削除。
@@ -125,74 +169,469 @@ type SyncCommand: Codec =
 
 // ── top-level ────────────────────────────────────────────────────────
 
-type Command: Codec =
+type Command =
   | Avatar(AvatarCommand)
   | Speech(SpeechCommand)
   | Scene(SceneCommand)
   | Overlay(OverlayCommand)
   | Sync(SyncCommand)
 
-type Response: Codec =
+type Response =
   | Pong { id: Option[String] }
-  | Ack { for_cmd: String, ok: Bool, error: Option[String] }
+  | Ack { for_cmd: String, accepted: Bool, error: Option[String] }
   | StateSnapshot { expressions: List[String], bones: List[String] }
 
-// ── ワイヤ変換ヘルパ ─────────────────────────────────────────────────
+// ── encode ヘルパ ────────────────────────────────────────────────────
 
-fn command_to_json(c: Command) -> String = json.stringify(Command.encode(c))
+local fn obj(domain: String, kind: String, fields: List[(String, Value)]) -> Value =
+  value.object([("domain", value.str(domain)), ("type", value.str(kind))] + fields)
+
+local fn opt_str(key: String, v: Option[String]) -> List[(String, Value)] =
+  match v { some(s) => [(key, value.str(s))], none => [] }
+
+local fn opt_int(key: String, v: Option[Int]) -> List[(String, Value)] =
+  match v { some(n) => [(key, value.int(n))], none => [] }
+
+local fn opt_float(key: String, v: Option[Float]) -> List[(String, Value)] =
+  match v { some(f) => [(key, value.float(f))], none => [] }
+
+local fn opt_bool(key: String, v: Option[Bool]) -> List[(String, Value)] =
+  match v { some(b) => [(key, value.bool(b))], none => [] }
+
+local fn float_map_to_value(m: Map[String, Float]) -> Value = {
+  var pairs: List[(String, Value)] = []
+  for (k, f) in m {
+    pairs = pairs + [(k, value.float(f))]
+  }
+  value.object(pairs)
+}
+
+local fn string_list_to_value(xs: List[String]) -> Value =
+  value.array(list.map(xs, (s) => value.str(s)))
+
+// ── decode ヘルパ ────────────────────────────────────────────────────
+
+local fn jget(v: Value, key: String) -> Value = value.get(v, key) ?? value.null()
+
+local fn jstr(v: Value, key: String) -> Option[String] =
+  result.to_option(value.as_string(jget(v, key)))
+
+local fn jbool(v: Value, key: String) -> Option[Bool] =
+  result.to_option(value.as_bool(jget(v, key)))
+
+local fn jint(v: Value, key: String) -> Option[Int] =
+  result.to_option(value.as_int(jget(v, key)))
+
+// JSON では 1 と 1.0 を区別しないので、float が欲しい場所では int も受ける。
+local fn jnum(v: Value, key: String) -> Option[Float] = {
+  let raw = jget(v, key)
+  match result.to_option(value.as_float(raw)) {
+    some(f) => some(f),
+    none    => match result.to_option(value.as_int(raw)) {
+      some(n) => some(int.to_float(n)),
+      none    => none,
+    },
+  }
+}
+
+local fn jstr_list(v: Value, key: String) -> List[String] =
+  list.filter_map(
+    result.unwrap_or(value.as_array(jget(v, key)), []),
+    (item) => result.to_option(value.as_string(item)))
+
+local fn jfloat_map(v: Value, key: String) -> Map[String, Float] = {
+  let o = jget(v, key)
+  let ks: List[String] = json.keys(o)
+  var m: Map[String, Float] = [:]
+  for k in ks {
+    match jnum(o, k) {
+      some(f) => { m[k] = f },
+      none    => (),
+    }
+  }
+  m
+}
+
+// ── Command encode ───────────────────────────────────────────────────
+
+fn command_encode(c: Command) -> Value = match c {
+  Avatar(a)  => avatar_encode(a),
+  Speech(s)  => speech_encode(s),
+  Scene(s)   => scene_encode(s),
+  Overlay(o) => overlay_encode(o),
+  Sync(s)    => sync_encode(s),
+}
+
+local fn avatar_encode(a: AvatarCommand) -> Value = match a {
+  SetExpression { name, weight } =>
+    obj("avatar", "setExpression", [("name", value.str(name)), ("weight", value.float(weight))]),
+  SetExpressions { values } =>
+    obj("avatar", "setExpressions", [("values", float_map_to_value(values))]),
+  LookAt { yaw, pitch } =>
+    obj("avatar", "lookAt", [("yaw", value.float(yaw)), ("pitch", value.float(pitch))]),
+  SetHeadRotation { x, y, z } =>
+    obj("avatar", "setHeadRotation", [("x", value.float(x)), ("y", value.float(y)), ("z", value.float(z))]),
+  SetBoneRotation { bone, x, y, z } =>
+    obj("avatar", "setBoneRotation", [("bone", value.str(bone)), ("x", value.float(x)), ("y", value.float(y)), ("z", value.float(z))]),
+  PlayMotion { clip, looping } =>
+    obj("avatar", "playMotion", [("clip", value.str(clip)), ("loop", value.bool(looping))]),
+  PlayProc { name } =>
+    obj("avatar", "playProc", [("name", value.str(name))]),
+  PlayFbx { url, looping, fade_ms } =>
+    obj("avatar", "playFbx", [("url", value.str(url)), ("loop", value.bool(looping))] + opt_int("fadeMs", fade_ms)),
+  StopMotion { fade_ms } =>
+    obj("avatar", "stopMotion", opt_int("fadeMs", fade_ms)),
+  SetIdle { blink, breath, sway } =>
+    obj("avatar", "setIdle", opt_bool("blink", blink) + opt_bool("breath", breath) + opt_bool("sway", sway)),
+  SetEmotion { name, weight } =>
+    obj("avatar", "setEmotion", [("name", value.str(emotion.emotion_to_tag(name)))] + opt_float("weight", weight)),
+  ResetAvatar =>
+    obj("avatar", "reset", []),
+}
+
+local fn speech_encode(s: SpeechCommand) -> Value = match s {
+  Speak { url }      => obj("speech", "speak", [("url", value.str(url))]),
+  StopSpeak          => obj("speech", "stopSpeak", []),
+  SetMic { enabled } => obj("speech", "setMic", [("enabled", value.bool(enabled))]),
+  MouthOpen { value: mouth } => obj("speech", "mouthOpen", [("value", value.float(mouth))]),
+}
+
+local fn scene_encode(s: SceneCommand) -> Value = match s {
+  SetBackground { mode, color, image_url } =>
+    obj("scene", "setBackground",
+      [("mode", value.str(background_mode_to_string(mode)))]
+        + opt_str("color", color) + opt_str("imageUrl", image_url)),
+  SetLighting { ambient_intensity, directional_intensity, ambient_color, directional_color } =>
+    obj("scene", "setLighting",
+      opt_float("ambientIntensity", ambient_intensity)
+        + opt_float("directionalIntensity", directional_intensity)
+        + opt_str("ambientColor", ambient_color)
+        + opt_str("directionalColor", directional_color)),
+  SetGrid { visible } =>
+    obj("scene", "setGrid", [("visible", value.bool(visible))]),
+  SetCamera { preset, duration_ms } =>
+    obj("scene", "setCamera",
+      [("preset", value.str(camera_preset_to_string(preset)))] + opt_int("durationMs", duration_ms)),
+}
+
+local fn overlay_encode(o: OverlayCommand) -> Value = match o {
+  PushComment(c) =>
+    obj("overlay", "comment", [("comment", comment.comment_encode(c))]),
+  SetReadingComment { id, user, text } =>
+    obj("overlay", "setReadingComment", opt_str("id", id) + opt_str("user", user) + [("text", value.str(text))]),
+  SetReply { text } =>
+    obj("overlay", "setReply", [("text", value.str(text))]),
+  SetFallback { url } =>
+    obj("overlay", "setFallback", opt_str("url", url)),
+  SetOpening { url, duration_ms } =>
+    obj("overlay", "setOpening", opt_str("url", url) + opt_int("durationMs", duration_ms)),
+  SetLayout { mode } =>
+    obj("overlay", "setLayout", [("mode", value.str(layout_mode_to_string(mode)))]),
+  ClearBroadcast =>
+    obj("overlay", "clearBroadcast", []),
+}
+
+local fn sync_encode(s: SyncCommand) -> Value = match s {
+  Ping { id } => obj("sync", "ping", opt_str("id", id)),
+  SettingChanged { scope, key, value_json, deleted } =>
+    obj("sync", "setting",
+      [("scope", value.str(scope)), ("key", value.str(key))]
+        + opt_str("valueJson", value_json)
+        + [("deleted", value.bool(deleted))]),
+  AudioLeader { is_you } =>
+    obj("sync", "audioLeader", [("isYou", value.bool(is_you))]),
+}
+
+// ── Command decode ───────────────────────────────────────────────────
+//
+// 方針: 必須の文字列/真偽値が欠けていても zero 値に倒す寛容デコード
+// (壊れた送信側がいてもパイプを止めない)。enum 文字列と domain/type の
+// 不一致だけはエラーにする。
+
+fn command_decode(v: Value) -> Result[Command, String] = {
+  let domain = jstr(v, "domain") ?? ""
+  let kind = jstr(v, "type") ?? ""
+  match domain {
+    "avatar"  => avatar_decode(kind, v),
+    "speech"  => speech_decode(kind, v),
+    "scene"   => scene_decode(kind, v),
+    "overlay" => overlay_decode(kind, v),
+    "sync"    => sync_decode(kind, v),
+    _         => err("unknown command domain: ${domain}"),
+  }
+}
+
+local fn avatar_decode(kind: String, v: Value) -> Result[Command, String] = match kind {
+  "setExpression" => ok(Avatar(SetExpression {
+    name: jstr(v, "name") ?? "",
+    weight: jnum(v, "weight") ?? 0.0,
+  })),
+  "setExpressions" => ok(Avatar(SetExpressions { values: jfloat_map(v, "values") })),
+  "lookAt" => ok(Avatar(LookAt { yaw: jnum(v, "yaw") ?? 0.0, pitch: jnum(v, "pitch") ?? 0.0 })),
+  "setHeadRotation" => ok(Avatar(SetHeadRotation {
+    x: jnum(v, "x") ?? 0.0, y: jnum(v, "y") ?? 0.0, z: jnum(v, "z") ?? 0.0,
+  })),
+  "setBoneRotation" => ok(Avatar(SetBoneRotation {
+    bone: jstr(v, "bone") ?? "",
+    x: jnum(v, "x") ?? 0.0, y: jnum(v, "y") ?? 0.0, z: jnum(v, "z") ?? 0.0,
+  })),
+  "playMotion" => ok(Avatar(PlayMotion {
+    clip: jstr(v, "clip") ?? "",
+    looping: jbool(v, "loop") ?? false,
+  })),
+  "playProc" => ok(Avatar(PlayProc { name: jstr(v, "name") ?? "" })),
+  "playFbx" => ok(Avatar(PlayFbx {
+    url: jstr(v, "url") ?? "",
+    looping: jbool(v, "loop") ?? false,
+    fade_ms: jint(v, "fadeMs"),
+  })),
+  "stopMotion" => ok(Avatar(StopMotion { fade_ms: jint(v, "fadeMs") })),
+  "setIdle" => ok(Avatar(SetIdle {
+    blink: jbool(v, "blink"), breath: jbool(v, "breath"), sway: jbool(v, "sway"),
+  })),
+  "setEmotion" => {
+    let tag = jstr(v, "name") ?? ""
+    match emotion.emotion_from_tag(tag) {
+      some(e) => ok(Avatar(SetEmotion { name: e, weight: jnum(v, "weight") })),
+      none    => err("unknown emotion: ${tag}"),
+    }
+  },
+  "reset" => ok(Avatar(ResetAvatar)),
+  _       => err("unknown avatar command: ${kind}"),
+}
+
+local fn speech_decode(kind: String, v: Value) -> Result[Command, String] = match kind {
+  "speak"     => ok(Speech(Speak { url: jstr(v, "url") ?? "" })),
+  "stopSpeak" => ok(Speech(StopSpeak)),
+  "setMic"    => ok(Speech(SetMic { enabled: jbool(v, "enabled") ?? false })),
+  "mouthOpen" => ok(Speech(MouthOpen { value: jnum(v, "value") ?? 0.0 })),
+  _           => err("unknown speech command: ${kind}"),
+}
+
+local fn scene_decode(kind: String, v: Value) -> Result[Command, String] = match kind {
+  "setBackground" => {
+    match background_mode_from_string(jstr(v, "mode") ?? "") {
+      err(e)   => err(e),
+      ok(mode) => ok(Scene(SetBackground {
+        mode: mode,
+        color: jstr(v, "color"),
+        image_url: jstr(v, "imageUrl"),
+      })),
+    }
+  },
+  "setLighting" => ok(Scene(SetLighting {
+    ambient_intensity: jnum(v, "ambientIntensity"),
+    directional_intensity: jnum(v, "directionalIntensity"),
+    ambient_color: jstr(v, "ambientColor"),
+    directional_color: jstr(v, "directionalColor"),
+  })),
+  "setGrid" => ok(Scene(SetGrid { visible: jbool(v, "visible") ?? false })),
+  "setCamera" => {
+    match camera_preset_from_string(jstr(v, "preset") ?? "") {
+      err(e)     => err(e),
+      ok(preset) => ok(Scene(SetCamera { preset: preset, duration_ms: jint(v, "durationMs") })),
+    }
+  },
+  _ => err("unknown scene command: ${kind}"),
+}
+
+local fn overlay_decode(kind: String, v: Value) -> Result[Command, String] = match kind {
+  "comment" => {
+    match comment.comment_decode(jget(v, "comment")) {
+      err(e) => err(e),
+      ok(c)  => ok(Overlay(PushComment(c))),
+    }
+  },
+  "setReadingComment" => ok(Overlay(SetReadingComment {
+    id: jstr(v, "id"), user: jstr(v, "user"), text: jstr(v, "text") ?? "",
+  })),
+  "setReply"    => ok(Overlay(SetReply { text: jstr(v, "text") ?? "" })),
+  "setFallback" => ok(Overlay(SetFallback { url: jstr(v, "url") })),
+  "setOpening"  => ok(Overlay(SetOpening { url: jstr(v, "url"), duration_ms: jint(v, "durationMs") })),
+  "setLayout" => {
+    match layout_mode_from_string(jstr(v, "mode") ?? "") {
+      err(e)   => err(e),
+      ok(mode) => ok(Overlay(SetLayout { mode: mode })),
+    }
+  },
+  "clearBroadcast" => ok(Overlay(ClearBroadcast)),
+  _                => err("unknown overlay command: ${kind}"),
+}
+
+local fn sync_decode(kind: String, v: Value) -> Result[Command, String] = match kind {
+  "ping" => ok(Sync(Ping { id: jstr(v, "id") })),
+  "setting" => ok(Sync(SettingChanged {
+    scope: jstr(v, "scope") ?? "",
+    key: jstr(v, "key") ?? "",
+    value_json: jstr(v, "valueJson"),
+    deleted: jbool(v, "deleted") ?? false,
+  })),
+  "audioLeader" => ok(Sync(AudioLeader { is_you: jbool(v, "isYou") ?? false })),
+  _             => err("unknown sync command: ${kind}"),
+}
+
+// ── Response codec ───────────────────────────────────────────────────
+
+fn response_encode(r: Response) -> Value = match r {
+  Pong { id } =>
+    value.object([("type", value.str("pong"))] + opt_str("id", id)),
+  Ack { for_cmd, accepted, error } =>
+    value.object(
+      [("type", value.str("ack")), ("for", value.str(for_cmd)), ("accepted", value.bool(accepted))]
+        + opt_str("error", error)),
+  StateSnapshot { expressions, bones } =>
+    value.object([
+      ("type", value.str("state")),
+      ("expressions", string_list_to_value(expressions)),
+      ("bones", string_list_to_value(bones)),
+    ]),
+}
+
+fn response_decode(v: Value) -> Result[Response, String] = {
+  let kind = jstr(v, "type") ?? ""
+  match kind {
+    "pong" => ok(Pong { id: jstr(v, "id") }),
+    "ack" => ok(Ack {
+      for_cmd: jstr(v, "for") ?? "",
+      accepted: jbool(v, "accepted") ?? false,
+      error: jstr(v, "error"),
+    }),
+    "state" => ok(StateSnapshot {
+      expressions: jstr_list(v, "expressions"),
+      bones: jstr_list(v, "bones"),
+    }),
+    _ => err("unknown response type: ${kind}"),
+  }
+}
+
+// ── ワイヤ変換 (JSON テキスト) ───────────────────────────────────────
+
+fn command_to_json(c: Command) -> String = json.stringify(command_encode(c))
 
 fn command_from_json(text: String) -> Result[Command, String] =
   match json.parse(text) {
-    ok(v)  => Command.decode(v),
+    ok(v)  => command_decode(v),
     err(e) => err(e),
   }
 
-fn response_to_json(r: Response) -> String = json.stringify(Response.encode(r))
+fn response_to_json(r: Response) -> String = json.stringify(response_encode(r))
 
 fn response_from_json(text: String) -> Result[Response, String] =
   match json.parse(text) {
-    ok(v)  => Response.decode(v),
+    ok(v)  => response_decode(v),
     err(e) => err(e),
   }
 
 // ── in-file contract tests ───────────────────────────────────────────
 
-test "avatar command json roundtrips" {
-  let c = Avatar(SetEmotion { name: emotion.Happy, weight: some(0.8) })
-  assert_eq(command_from_json(command_to_json(c)), ok(c))
+local fn rt(c: Command) -> Result[Command, String] = command_from_json(command_to_json(c))
+
+test "every avatar command roundtrips" {
+  let cases = [
+    Avatar(SetExpression { name: "aa", weight: 0.7 }),
+    Avatar(SetExpressions { values: ["aa": 0.5, "blink": 1.0] }),
+    Avatar(LookAt { yaw: 0.1, pitch: 0.2 }),
+    Avatar(SetHeadRotation { x: 0.1, y: 0.2, z: 0.3 }),
+    Avatar(SetBoneRotation { bone: "neck", x: 0.1, y: 0.2, z: 0.3 }),
+    Avatar(PlayMotion { clip: "idle", looping: true }),
+    Avatar(PlayProc { name: "banzai" }),
+    Avatar(PlayFbx { url: "/motions/wave.fbx", looping: false, fade_ms: some(300) }),
+    Avatar(StopMotion { fade_ms: none }),
+    Avatar(SetIdle { blink: some(true), breath: none, sway: some(false) }),
+    Avatar(SetEmotion { name: emotion.Happy, weight: some(0.8) }),
+    Avatar(SetEmotion { name: emotion.Jitome, weight: none }),
+    Avatar(ResetAvatar),
+  ]
+  for c in cases {
+    assert_eq(rt(c), ok(c))
+  }
 }
 
-test "overlay comment command json roundtrips" {
-  let c = Overlay(PushComment(comment.Comment {
-    id: "yt-42",
-    user: "viewer",
-    text: "かわいい！",
-    color: none,
-    source: comment.Youtube,
-  }))
-  assert_eq(command_from_json(command_to_json(c)), ok(c))
+test "every speech command roundtrips" {
+  let cases = [
+    Speech(Speak { url: "blob:abc" }),
+    Speech(StopSpeak),
+    Speech(SetMic { enabled: true }),
+    Speech(MouthOpen { value: 0.35 }),
+  ]
+  for c in cases {
+    assert_eq(rt(c), ok(c))
+  }
 }
 
-test "sync setting command json roundtrips" {
-  let c = Sync(SettingChanged {
-    scope: "overlay:vertical",
-    key: "reply_card_y",
-    value_json: some("0.42"),
-    deleted: false,
-  })
-  assert_eq(command_from_json(command_to_json(c)), ok(c))
+test "every scene command roundtrips" {
+  let cases = [
+    Scene(SetBackground { mode: Transparent, color: none, image_url: none }),
+    Scene(SetBackground { mode: SolidColor, color: some("#00ff00"), image_url: none }),
+    Scene(SetBackground { mode: Image, color: none, image_url: some("/bg.png") }),
+    Scene(SetLighting { ambient_intensity: some(0.6), directional_intensity: none, ambient_color: some("#ffffff"), directional_color: none }),
+    Scene(SetGrid { visible: false }),
+    Scene(SetCamera { preset: Upper, duration_ms: some(800) }),
+  ]
+  for c in cases {
+    assert_eq(rt(c), ok(c))
+  }
 }
 
-test "speech mouth value json roundtrips" {
-  let c = Speech(MouthOpen { value: 0.35 })
-  assert_eq(command_from_json(command_to_json(c)), ok(c))
+test "every overlay command roundtrips" {
+  let cases = [
+    Overlay(PushComment(comment.Comment { id: "yt-42", user: "viewer", text: "かわいい！", color: none, source: comment.Youtube })),
+    Overlay(SetReadingComment { id: some("yt-42"), user: some("viewer"), text: "かわいい！" }),
+    Overlay(SetReply { text: "ありがと！" }),
+    Overlay(SetFallback { url: some("/fallback.png") }),
+    Overlay(SetFallback { url: none }),
+    Overlay(SetOpening { url: some("/op.mp4"), duration_ms: some(5000) }),
+    Overlay(SetLayout { mode: Vertical }),
+    Overlay(ClearBroadcast),
+  ]
+  for c in cases {
+    assert_eq(rt(c), ok(c))
+  }
 }
 
-test "response json roundtrips" {
-  let r = Ack { for_cmd: "SetReply", ok: true, error: none }
-  assert_eq(response_from_json(response_to_json(r)), ok(r))
+test "every sync command roundtrips" {
+  let cases = [
+    Sync(Ping { id: some("p1") }),
+    Sync(SettingChanged { scope: "overlay:vertical", key: "reply_card_y", value_json: some("0.42"), deleted: false }),
+    Sync(SettingChanged { scope: "bgm", key: "track", value_json: none, deleted: true }),
+    Sync(AudioLeader { is_you: true }),
+  ]
+  for c in cases {
+    assert_eq(rt(c), ok(c))
+  }
 }
 
-test "malformed json is rejected" {
-  assert_eq(result.is_err(command_from_json("not json")), true)
+test "every response roundtrips" {
+  let cases = [
+    Pong { id: some("p1") },
+    Ack { for_cmd: "setReply", accepted: true, error: none },
+    Ack { for_cmd: "playFbx", accepted: false, error: some("no such clip") },
+    StateSnapshot { expressions: ["aa", "blink"], bones: ["neck"] },
+  ]
+  for r in cases {
+    assert_eq(response_from_json(response_to_json(r)), ok(r))
+  }
+}
+
+test "wire format is flat domain/type json" {
+  let wire = command_to_json(Avatar(SetEmotion { name: emotion.Happy, weight: some(0.8) }))
+  assert(string.contains(wire, "\"domain\":\"avatar\""))
+  assert(string.contains(wire, "\"type\":\"setEmotion\""))
+  assert(string.contains(wire, "\"name\":\"happy\""))
+}
+
+test "hand-authored wire lines decode" {
+  assert_eq(
+    command_from_json("{\"domain\":\"overlay\",\"type\":\"clearBroadcast\"}"),
+    ok(Overlay(ClearBroadcast)))
+  assert_eq(
+    command_from_json("{\"domain\":\"speech\",\"type\":\"mouthOpen\",\"value\":0.5}"),
+    ok(Speech(MouthOpen { value: 0.5 })))
+}
+
+test "unknown domains, types and enums are rejected" {
+  assert(result.is_err(command_from_json("{\"domain\":\"warp\",\"type\":\"x\"}")))
+  assert(result.is_err(command_from_json("{\"domain\":\"avatar\",\"type\":\"fly\"}")))
+  assert(result.is_err(command_from_json("{\"domain\":\"avatar\",\"type\":\"setEmotion\",\"name\":\"telepathy\"}")))
+  assert(result.is_err(command_from_json("not json")))
 }

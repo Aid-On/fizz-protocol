@@ -5,16 +5,35 @@
 // chat/memoryClient.ts の型を統合・正規化したもの。
 //
 // 時刻はすべて unix epoch ミリ秒 (Int)。
+//
+// ワイヤ形式 (手書きコーデックが正): 旧 openaituber の /api/memory 系と
+// 同じフィールド名を踏襲する — event/user は snake_case (SQLite 行由来)、
+// セッション統計系は camelCase (API レスポンス由来)。enum は文字列。
 
-type MemoryRole: Codec, Repr =
+import json
+
+type MemoryRole =
   // 視聴者の発言。
   | User
   // キャラクターの返答。
   | Assistant
-  // キャラクターの独白・自己メモ (旧 "self")。
+  // キャラクターの独白・自己メモ。
   | SelfNote
 
-type MemoryEvent: Codec = {
+fn role_to_string(r: MemoryRole) -> String = match r {
+  User      => "user",
+  Assistant => "assistant",
+  SelfNote  => "self",
+}
+
+fn role_from_string(s: String) -> Result[MemoryRole, String] = match s {
+  "user"      => ok(User),
+  "assistant" => ok(Assistant),
+  "self"      => ok(SelfNote),
+  _           => err("unknown memory role: ${s}"),
+}
+
+type MemoryEvent = {
   id: Int,
   user_id: Int,
   session_id: Option[Int],
@@ -25,7 +44,7 @@ type MemoryEvent: Codec = {
   tags: List[String],
 }
 
-type MemoryUser: Codec = {
+type MemoryUser = {
   id: Int,
   // 表示名ベースの識別 (将来 external_id 列で ID 体系化予定)。
   name: String,
@@ -38,7 +57,7 @@ type MemoryUser: Codec = {
 }
 
 // 配信セッション (配信境界の明示化)。
-type MemorySession: Codec = {
+type MemorySession = {
   id: Int,
   started_at: Int,
   ended_at: Option[Int],
@@ -49,7 +68,7 @@ type MemorySession: Codec = {
 }
 
 // 過去配信における特定ユーザの参加スケッチ。
-type SessionParticipation: Codec = {
+type SessionParticipation = {
   session_id: Int,
   started_at: Int,
   ended_at: Option[Int],
@@ -61,28 +80,73 @@ type SessionParticipation: Codec = {
 }
 
 // コメント間隔の偏り。
-type Burstiness: Codec, Repr =
+type Burstiness =
   | Burst
   | EvenPace
   | Sparse
   | NoBurstData
 
+fn burstiness_to_string(b: Burstiness) -> String = match b {
+  Burst       => "burst",
+  EvenPace    => "even",
+  Sparse      => "sparse",
+  NoBurstData => "none",
+}
+
+fn burstiness_from_string(s: String) -> Result[Burstiness, String] = match s {
+  "burst"  => ok(Burst),
+  "even"   => ok(EvenPace),
+  "sparse" => ok(Sparse),
+  "none"   => ok(NoBurstData),
+  _        => err("unknown burstiness: ${s}"),
+}
+
 // 直近のコメントテンポ変化。
-type RecentTempo: Codec, Repr =
+type RecentTempo =
   | RampingUp
   | Cooling
   | Steady
   | NoTempoData
 
+fn tempo_to_string(t: RecentTempo) -> String = match t {
+  RampingUp   => "ramping_up",
+  Cooling     => "cooling",
+  Steady      => "steady",
+  NoTempoData => "none",
+}
+
+fn tempo_from_string(s: String) -> Result[RecentTempo, String] = match s {
+  "ramping_up" => ok(RampingUp),
+  "cooling"    => ok(Cooling),
+  "steady"     => ok(Steady),
+  "none"       => ok(NoTempoData),
+  _            => err("unknown tempo: ${s}"),
+}
+
 // コメントの性格分類。
-type EngagementTone: Codec, Repr =
+type EngagementTone =
   | Reactive
   | Questioning
   | Narrative
   | Mixed
 
+fn tone_to_string(t: EngagementTone) -> String = match t {
+  Reactive    => "reactive",
+  Questioning => "questioning",
+  Narrative   => "narrative",
+  Mixed       => "mixed",
+}
+
+fn tone_from_string(s: String) -> Result[EngagementTone, String] = match s {
+  "reactive"    => ok(Reactive),
+  "questioning" => ok(Questioning),
+  "narrative"   => ok(Narrative),
+  "mixed"       => ok(Mixed),
+  _             => err("unknown tone: ${s}"),
+}
+
 // 当該セッション内でのユーザの振る舞い統計。
-type SessionEngagement: Codec = {
+type SessionEngagement = {
   msg_count: Int,
   first_ts: Option[Int],
   last_ts: Option[Int],
@@ -97,14 +161,31 @@ type SessionEngagement: Codec = {
 }
 
 // 出席パターンのフレーバ。
-type AttendanceFlavor: Codec, Repr =
+type AttendanceFlavor =
   | FirstTime
   | Regular
   | Occasional
   | LongAbsent
   | FreshReturn
 
-type PastSessionsSummary: Codec = {
+fn attendance_to_string(a: AttendanceFlavor) -> String = match a {
+  FirstTime   => "first_time",
+  Regular     => "regular",
+  Occasional  => "occasional",
+  LongAbsent  => "long_absent",
+  FreshReturn => "fresh_return",
+}
+
+fn attendance_from_string(s: String) -> Result[AttendanceFlavor, String] = match s {
+  "first_time"   => ok(FirstTime),
+  "regular"      => ok(Regular),
+  "occasional"   => ok(Occasional),
+  "long_absent"  => ok(LongAbsent),
+  "fresh_return" => ok(FreshReturn),
+  _              => err("unknown attendance flavor: ${s}"),
+}
+
+type PastSessionsSummary = {
   sessions_attended_recent: Int,
   sessions_considered_recent: Int,
   last_session_gap_ms: Option[Int],
@@ -117,7 +198,7 @@ type PastSessionsSummary: Codec = {
 // brain はこれを preamble 生成の素材として使う。
 // 注意: 会話は前の話題を引きずらない方針のため、brain 側で使うのは
 // summary + 直近わずか — recall 全量をプロンプトに流し込まないこと。
-type RecallResult: Codec = {
+type RecallResult = {
   user: MemoryUser,
   recent: List[MemoryEvent],
   is_returning: Bool,
@@ -129,6 +210,262 @@ type RecallResult: Codec = {
   recent_sessions: List[SessionParticipation],
   engagement: Option[SessionEngagement],
 }
+
+// ── JSON ヘルパ (local) ──────────────────────────────────────────────
+
+local fn jget(v: Value, key: String) -> Value = value.get(v, key) ?? value.null()
+
+local fn jstr(v: Value, key: String) -> Option[String] =
+  result.to_option(value.as_string(jget(v, key)))
+
+local fn jint(v: Value, key: String) -> Option[Int] =
+  result.to_option(value.as_int(jget(v, key)))
+
+local fn jbool(v: Value, key: String) -> Option[Bool] =
+  result.to_option(value.as_bool(jget(v, key)))
+
+local fn jnum(v: Value, key: String) -> Option[Float] = {
+  let raw = jget(v, key)
+  match result.to_option(value.as_float(raw)) {
+    some(f) => some(f),
+    none    => match result.to_option(value.as_int(raw)) {
+      some(n) => some(int.to_float(n)),
+      none    => none,
+    },
+  }
+}
+
+local fn jarr(v: Value, key: String) -> List[Value] =
+  result.unwrap_or(value.as_array(jget(v, key)), [])
+
+local fn opt_str(key: String, v: Option[String]) -> List[(String, Value)] =
+  match v { some(s) => [(key, value.str(s))], none => [] }
+
+local fn opt_int(key: String, v: Option[Int]) -> List[(String, Value)] =
+  match v { some(n) => [(key, value.int(n))], none => [] }
+
+local fn opt_float(key: String, v: Option[Float]) -> List[(String, Value)] =
+  match v { some(f) => [(key, value.float(f))], none => [] }
+
+// ── コーデック (手書きが契約の正) ────────────────────────────────────
+
+fn event_encode(e: MemoryEvent) -> Value =
+  value.object(
+    [("id", value.int(e.id)), ("user_id", value.int(e.user_id))]
+      + opt_int("session_id", e.session_id)
+      + [
+          ("role", value.str(role_to_string(e.role))),
+          ("content", value.str(e.content)),
+          ("ts", value.int(e.ts)),
+          ("tags", value.array(list.map(e.tags, (t) => value.str(t)))),
+        ])
+
+fn event_decode(v: Value) -> Result[MemoryEvent, String] =
+  match role_from_string(jstr(v, "role") ?? "") {
+    err(e)   => err(e),
+    ok(role) => ok(MemoryEvent {
+      id: jint(v, "id") ?? 0,
+      user_id: jint(v, "user_id") ?? 0,
+      session_id: jint(v, "session_id"),
+      role: role,
+      content: jstr(v, "content") ?? "",
+      ts: jint(v, "ts") ?? 0,
+      tags: list.filter_map(jarr(v, "tags"), (t) => result.to_option(value.as_string(t))),
+    }),
+  }
+
+fn user_encode(u: MemoryUser) -> Value =
+  value.object(
+    [
+      ("id", value.int(u.id)),
+      ("name", value.str(u.name)),
+      ("first_seen", value.int(u.first_seen)),
+      ("last_seen", value.int(u.last_seen)),
+      ("message_count", value.int(u.message_count)),
+    ]
+      + opt_str("summary", u.summary)
+      + opt_int("summary_updated_at", u.summary_updated_at))
+
+fn user_decode(v: Value) -> Result[MemoryUser, String] =
+  ok(MemoryUser {
+    id: jint(v, "id") ?? 0,
+    name: jstr(v, "name") ?? "",
+    first_seen: jint(v, "first_seen") ?? 0,
+    last_seen: jint(v, "last_seen") ?? 0,
+    message_count: jint(v, "message_count") ?? 0,
+    summary: jstr(v, "summary"),
+    summary_updated_at: jint(v, "summary_updated_at"),
+  })
+
+fn session_encode(s: MemorySession) -> Value =
+  value.object(
+    [("id", value.int(s.id)), ("started_at", value.int(s.started_at))]
+      + opt_int("ended_at", s.ended_at)
+      + [("persona", value.str(s.persona))]
+      + opt_str("summary", s.summary)
+      + opt_str("title", s.title))
+
+fn session_decode(v: Value) -> Result[MemorySession, String] =
+  ok(MemorySession {
+    id: jint(v, "id") ?? 0,
+    started_at: jint(v, "started_at") ?? 0,
+    ended_at: jint(v, "ended_at"),
+    persona: jstr(v, "persona") ?? "",
+    summary: jstr(v, "summary"),
+    title: jstr(v, "title"),
+  })
+
+fn participation_encode(p: SessionParticipation) -> Value =
+  value.object(
+    [("sessionId", value.int(p.session_id)), ("startedAt", value.int(p.started_at))]
+      + opt_int("endedAt", p.ended_at)
+      + opt_str("title", p.title)
+      + [
+          ("userMsgCount", value.int(p.user_msg_count)),
+          ("firstTsInSession", value.int(p.first_ts_in_session)),
+          ("lastTsInSession", value.int(p.last_ts_in_session)),
+        ]
+      + opt_str("sessionSummary", p.session_summary))
+
+fn participation_decode(v: Value) -> Result[SessionParticipation, String] =
+  ok(SessionParticipation {
+    session_id: jint(v, "sessionId") ?? 0,
+    started_at: jint(v, "startedAt") ?? 0,
+    ended_at: jint(v, "endedAt"),
+    title: jstr(v, "title"),
+    user_msg_count: jint(v, "userMsgCount") ?? 0,
+    first_ts_in_session: jint(v, "firstTsInSession") ?? 0,
+    last_ts_in_session: jint(v, "lastTsInSession") ?? 0,
+    session_summary: jstr(v, "sessionSummary"),
+  })
+
+fn engagement_encode(e: SessionEngagement) -> Value =
+  value.object(
+    [("msgCount", value.int(e.msg_count))]
+      + opt_int("firstTs", e.first_ts)
+      + opt_int("lastTs", e.last_ts)
+      + [("avgLen", value.float(e.avg_len)), ("maxLen", value.int(e.max_len))]
+      + opt_int("intervalMedianMs", e.interval_median_ms)
+      + [
+          ("burstiness", value.str(burstiness_to_string(e.burstiness))),
+          ("recentTempo", value.str(tempo_to_string(e.recent_tempo))),
+        ]
+      + opt_float("reactionRate", e.reaction_rate)
+      + opt_float("questionRate", e.question_rate)
+      + (match e.tone { some(t) => [("tone", value.str(tone_to_string(t)))], none => [] }))
+
+fn engagement_decode(v: Value) -> Result[SessionEngagement, String] = {
+  let burst = burstiness_from_string(jstr(v, "burstiness") ?? "none")
+  let tempo = tempo_from_string(jstr(v, "recentTempo") ?? "none")
+  match burst {
+    err(e) => err(e),
+    ok(b)  => match tempo {
+      err(e) => err(e),
+      ok(t)  => ok(SessionEngagement {
+        msg_count: jint(v, "msgCount") ?? 0,
+        first_ts: jint(v, "firstTs"),
+        last_ts: jint(v, "lastTs"),
+        avg_len: jnum(v, "avgLen") ?? 0.0,
+        max_len: jint(v, "maxLen") ?? 0,
+        interval_median_ms: jint(v, "intervalMedianMs"),
+        burstiness: b,
+        recent_tempo: t,
+        reaction_rate: jnum(v, "reactionRate"),
+        question_rate: jnum(v, "questionRate"),
+        tone: match jstr(v, "tone") {
+          some(s) => result.to_option(tone_from_string(s)),
+          none    => none,
+        },
+      }),
+    },
+  }
+}
+
+fn past_sessions_encode(p: PastSessionsSummary) -> Value =
+  value.object(
+    [
+      ("sessionsAttendedRecent", value.int(p.sessions_attended_recent)),
+      ("sessionsConsideredRecent", value.int(p.sessions_considered_recent)),
+    ]
+      + opt_int("lastSessionGapMs", p.last_session_gap_ms)
+      + opt_int("lastSessionMsgCount", p.last_session_msg_count)
+      + [("attendanceFlavor", value.str(attendance_to_string(p.attendance_flavor)))]
+      + opt_str("lastSessionSummary", p.last_session_summary))
+
+fn past_sessions_decode(v: Value) -> Result[PastSessionsSummary, String] =
+  match attendance_from_string(jstr(v, "attendanceFlavor") ?? "") {
+    err(e) => err(e),
+    ok(a)  => ok(PastSessionsSummary {
+      sessions_attended_recent: jint(v, "sessionsAttendedRecent") ?? 0,
+      sessions_considered_recent: jint(v, "sessionsConsideredRecent") ?? 0,
+      last_session_gap_ms: jint(v, "lastSessionGapMs"),
+      last_session_msg_count: jint(v, "lastSessionMsgCount"),
+      attendance_flavor: a,
+      last_session_summary: jstr(v, "lastSessionSummary"),
+    }),
+  }
+
+fn recall_encode(r: RecallResult) -> Value =
+  value.object(
+    [
+      ("user", user_encode(r.user)),
+      ("recent", value.array(list.map(r.recent, event_encode))),
+      ("isReturning", value.bool(r.is_returning)),
+      ("daysSinceLastSeen", value.int(r.days_since_last_seen)),
+      ("sessionUserCount", value.int(r.session_user_count)),
+    ]
+      + opt_int("sessionStartedAt", r.session_started_at)
+      + [("totalUserCount", value.int(r.total_user_count))]
+      + (match r.past_sessions { some(p) => [("pastSessions", past_sessions_encode(p))], none => [] })
+      + [("recentSessions", value.array(list.map(r.recent_sessions, participation_encode)))]
+      + (match r.engagement { some(e) => [("engagement", engagement_encode(e))], none => [] }))
+
+fn recall_decode(v: Value) -> Result[RecallResult, String] =
+  match user_decode(jget(v, "user")) {
+    err(e) => err(e),
+    ok(u)  => {
+      let recent = list.filter_map(jarr(v, "recent"), (item) => result.to_option(event_decode(item)))
+      let sessions = list.filter_map(jarr(v, "recentSessions"), (item) => result.to_option(participation_decode(item)))
+      let past = match value.get(v, "pastSessions") {
+        ok(p)  => result.to_option(past_sessions_decode(p)),
+        err(_) => none,
+      }
+      let engagement = match value.get(v, "engagement") {
+        ok(e)  => result.to_option(engagement_decode(e)),
+        err(_) => none,
+      }
+      ok(RecallResult {
+        user: u,
+        recent: recent,
+        is_returning: jbool(v, "isReturning") ?? false,
+        days_since_last_seen: jint(v, "daysSinceLastSeen") ?? 0,
+        session_user_count: jint(v, "sessionUserCount") ?? 0,
+        session_started_at: jint(v, "sessionStartedAt"),
+        total_user_count: jint(v, "totalUserCount") ?? 0,
+        past_sessions: past,
+        recent_sessions: sessions,
+        engagement: engagement,
+      })
+    },
+  }
+
+// ── ワイヤ変換ヘルパ (JSON テキスト) ─────────────────────────────────
+
+fn event_to_json(e: MemoryEvent) -> String = json.stringify(event_encode(e))
+
+fn event_from_json(text: String) -> Result[MemoryEvent, String] =
+  match json.parse(text) {
+    ok(v)  => event_decode(v),
+    err(e) => err(e),
+  }
+
+fn recall_to_json(r: RecallResult) -> String = json.stringify(recall_encode(r))
+
+fn recall_from_json(text: String) -> Result[RecallResult, String] =
+  match json.parse(text) {
+    ok(v)  => recall_decode(v),
+    err(e) => err(e),
+  }
 
 // ── in-file contract tests ───────────────────────────────────────────
 
@@ -142,10 +479,28 @@ test "memory event codec roundtrips" {
     ts: 1780000000000,
     tags: ["greeting"],
   }
-  assert_eq(MemoryEvent.decode(MemoryEvent.encode(e)), ok(e))
+  assert_eq(event_from_json(event_to_json(e)), ok(e))
 }
 
-test "recall result codec roundtrips" {
+test "every memory enum string roundtrips" {
+  for r in [User, Assistant, SelfNote] {
+    assert_eq(role_from_string(role_to_string(r)), ok(r))
+  }
+  for b in [Burst, EvenPace, Sparse, NoBurstData] {
+    assert_eq(burstiness_from_string(burstiness_to_string(b)), ok(b))
+  }
+  for t in [RampingUp, Cooling, Steady, NoTempoData] {
+    assert_eq(tempo_from_string(tempo_to_string(t)), ok(t))
+  }
+  for t in [Reactive, Questioning, Narrative, Mixed] {
+    assert_eq(tone_from_string(tone_to_string(t)), ok(t))
+  }
+  for a in [FirstTime, Regular, Occasional, LongAbsent, FreshReturn] {
+    assert_eq(attendance_from_string(attendance_to_string(a)), ok(a))
+  }
+}
+
+test "full recall result roundtrips" {
   let u = MemoryUser {
     id: 7,
     name: "viewer",
@@ -155,17 +510,55 @@ test "recall result codec roundtrips" {
     summary: some("常連。猫の話が好き。"),
     summary_updated_at: some(1779000000000),
   }
+  let e = MemoryEvent {
+    id: 1, user_id: 7, session_id: some(3), role: User,
+    content: "今日も来たよ", ts: 1780000000000, tags: [],
+  }
   let r = RecallResult {
     user: u,
-    recent: [],
+    recent: [e],
     is_returning: true,
     days_since_last_seen: 3,
     session_user_count: 5,
     session_started_at: some(1780000000000),
     total_user_count: 120,
-    past_sessions: none,
-    recent_sessions: [],
-    engagement: none,
+    past_sessions: some(PastSessionsSummary {
+      sessions_attended_recent: 4,
+      sessions_considered_recent: 10,
+      last_session_gap_ms: some(86400000),
+      last_session_msg_count: some(12),
+      attendance_flavor: Regular,
+      last_session_summary: some("猫の話で盛り上がった"),
+    }),
+    recent_sessions: [SessionParticipation {
+      session_id: 3, started_at: 1780000000000, ended_at: none,
+      title: some("昼配信"), user_msg_count: 12,
+      first_ts_in_session: 1780000000000, last_ts_in_session: 1780000300000,
+      session_summary: none,
+    }],
+    engagement: some(SessionEngagement {
+      msg_count: 12, first_ts: some(1780000000000), last_ts: some(1780000300000),
+      avg_len: 18.5, max_len: 60, interval_median_ms: some(25000),
+      burstiness: Burst, recent_tempo: Steady,
+      reaction_rate: some(0.4), question_rate: none, tone: some(Reactive),
+    }),
   }
-  assert_eq(RecallResult.decode(RecallResult.encode(r)), ok(r))
+  assert_eq(recall_from_json(recall_to_json(r)), ok(r))
+}
+
+test "minimal recall result roundtrips" {
+  let u = MemoryUser {
+    id: 1, name: "newbie", first_seen: 1, last_seen: 2,
+    message_count: 1, summary: none, summary_updated_at: none,
+  }
+  let r = RecallResult {
+    user: u, recent: [], is_returning: false, days_since_last_seen: 0,
+    session_user_count: 1, session_started_at: none, total_user_count: 1,
+    past_sessions: none, recent_sessions: [], engagement: none,
+  }
+  assert_eq(recall_from_json(recall_to_json(r)), ok(r))
+}
+
+test "unknown role is rejected" {
+  assert(result.is_err(event_from_json("{\"id\":1,\"user_id\":1,\"role\":\"ghost\",\"content\":\"x\",\"ts\":1,\"tags\":[]}")))
 }
