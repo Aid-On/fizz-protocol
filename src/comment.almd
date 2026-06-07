@@ -1,8 +1,14 @@
 // fizz_protocol.comment — 正規化コメント。
 //
-// すべてのチャットソース部品 (fizz-source-youtube / fizz-source-twitch /
-// fizz-source-x / 手入力) はこの型に正規化して下流へ流す。
+// すべてのチャットソース部品 (fizz-youtube-chat-source /
+// fizz-twitch-chat-source / fizz-x-mention-source / fizz-manual-comment-input)
+// はこの型に正規化して下流へ流す。
 // ソースを増やしても下流 (dedupe / classifier / brain / overlay) は不変。
+//
+// ソース部品の標準出力形式は NDJSON (1 行 1 コメント、comment_to_json)。
+// `fizz-youtube-chat-source | fizz-comment-dedupe | ...` とパイプで合成する。
+
+import json
 
 type CommentSource: Codec, Repr =
   | Youtube
@@ -25,7 +31,22 @@ type Comment: Codec = {
   source: CommentSource,
 }
 
+// ── ワイヤ変換ヘルパ (NDJSON 1 行分) ─────────────────────────────────
+
+fn comment_to_json(c: Comment) -> String = json.stringify(Comment.encode(c))
+
+fn comment_from_json(text: String) -> Result[Comment, String] =
+  match json.parse(text) {
+    ok(v)  => Comment.decode(v),
+    err(e) => err(e),
+  }
+
 // ── in-file contract tests ───────────────────────────────────────────
+
+test "comment json line roundtrips" {
+  let c = Comment { id: "tw-9", user: "viewer", text: "それな", color: none, source: Twitch }
+  assert_eq(comment_from_json(comment_to_json(c)), ok(c))
+}
 
 test "comment codec roundtrips" {
   let c = Comment {
