@@ -176,7 +176,7 @@ type Command =
   | Overlay(OverlayCommand)
   | Sync(SyncCommand)
 
-type Response =
+type CommandResponse =
   | Pong { id: Option[String] }
   | Ack { for_cmd: String, accepted: Bool, error: Option[String] }
   | StateSnapshot { expressions: List[String], bones: List[String] }
@@ -470,9 +470,9 @@ local fn sync_decode(kind: String, v: Value) -> Result[Command, String] = match 
   _             => err("unknown sync command: ${kind}"),
 }
 
-// ── Response codec ───────────────────────────────────────────────────
+// ── CommandResponse codec ───────────────────────────────────────────────────
 
-fn response_encode(r: Response) -> Value = match r {
+fn response_encode(r: CommandResponse) -> Value = match r {
   Pong { id } =>
     value.object([("type", value.str("pong"))] + opt_str("id", id)),
   Ack { for_cmd, accepted, error } =>
@@ -487,7 +487,7 @@ fn response_encode(r: Response) -> Value = match r {
     ]),
 }
 
-fn response_decode(v: Value) -> Result[Response, String] = {
+fn response_decode(v: Value) -> Result[CommandResponse, String] = {
   let kind = jstr(v, "type") ?? ""
   match kind {
     "pong" => ok(Pong { id: jstr(v, "id") }),
@@ -514,9 +514,9 @@ fn command_from_json(text: String) -> Result[Command, String] =
     err(e) => err(e),
   }
 
-fn response_to_json(r: Response) -> String = json.stringify(response_encode(r))
+fn response_to_json(r: CommandResponse) -> String = json.stringify(response_encode(r))
 
-fn response_from_json(text: String) -> Result[Response, String] =
+fn response_from_json(text: String) -> Result[CommandResponse, String] =
   match json.parse(text) {
     ok(v)  => response_decode(v),
     err(e) => err(e),

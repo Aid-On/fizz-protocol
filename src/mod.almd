@@ -8,7 +8,7 @@
 //   fizz_protocol.emotion  — 感情語彙とインラインタグ文法 ([happy] / [fx:nod] / [hair:short])
 //   fizz_protocol.comment  — 正規化コメント (全チャットソースの出力型)
 //   fizz_protocol.speak    — 発話単位 (SentenceFragment / SpeakItem)
-//   fizz_protocol.command  — ワイヤコマンド (avatar / speech / scene / overlay / sync) と Response
+//   fizz_protocol.command  — ワイヤコマンド (avatar / speech / scene / overlay / sync) と CommandResponse
 //   fizz_protocol.memory   — 記憶イベント / ユーザ / セッション / recall 結果
 //
 // ワイヤ形式は各モジュールの手書きコーデックが正 (deriving Codec は
